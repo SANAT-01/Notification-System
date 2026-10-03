@@ -1,4 +1,4 @@
-# Notification System Lab
+# Notification System - https://notifications.sanattudu.tech
 
 A working notification pipeline — RabbitMQ fan-out, Node/Express producer and
 workers, Redis-backed idempotency, and a Next.js dashboard — built to let you
