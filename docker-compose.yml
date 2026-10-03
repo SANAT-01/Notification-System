@@ -23,15 +23,26 @@ services:
     image: redis:7-alpine
     container_name: redis
 
+  # Express HTTP API: POST /notify queues one event, fanned out to
+  # notify.push + notify.email. Not published to the host — only the
+  # dashboard (over the Docker network) and docker compose exec reach it.
   producer:
     build: ./app
     container_name: producer
     depends_on:
       - rabbitmq
+      - redis
     environment:
+      SERVICE_NAME: producer
       RABBITMQ_HOST: rabbitmq
-    # Idle service; ./notify.sh execs publish.py inside it to fire notifications.
-    command: ["tail", "-f", "/dev/null"]
+      REDISHOST: redis
+      PORT: "3000"
+    command: ["node", "src/producer/index.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   push-worker:
     build: ./app
@@ -40,17 +51,19 @@ services:
       - rabbitmq
       - redis
     environment:
+      SERVICE_NAME: push-worker
       RABBITMQ_HOST: rabbitmq
       REDISHOST: redis
       CHANNEL: push
-      # No dedupe to start — adding the idempotency record is the student's fix.
+      PORT: "3000"
+      # Startup defaults only (seeded into Redis lab:flags if unset). The
+      # dashboard toggles both flags at runtime for every worker — no recreate.
       IDEMPOTENCY_ENABLED: "false"
-      # Off until the claim-lease task — closes the gap the plain claim leaves.
       CLAIM_LEASE_ENABLED: "false"
     # The crash task makes this worker exit on purpose; Docker brings it back so
     # RabbitMQ can redeliver the un-acked message.
     restart: unless-stopped
-    command: ["python", "/app/worker.py"]
+    command: ["node", "src/worker/index.js"]
 
   email-worker:
     build: ./app
@@ -59,10 +72,24 @@ services:
       - rabbitmq
       - redis
     environment:
+      SERVICE_NAME: email-worker
       RABBITMQ_HOST: rabbitmq
       REDISHOST: redis
       CHANNEL: email
+      PORT: "3000"
       IDEMPOTENCY_ENABLED: "false"
       CLAIM_LEASE_ENABLED: "false"
     restart: unless-stopped
-    command: ["python", "/app/worker.py"]
+    command: ["node", "src/worker/index.js"]
+
+  # Browser dashboard to fire lab scenarios. Proxies server-side to the
+  # producer over the Docker network — the producer is never exposed to the host.
+  dashboard:
+    build: ./web
+    container_name: dashboard
+    depends_on:
+      - producer
+    environment:
+      PRODUCER_URL: http://producer:3000
+    ports:
+      - "3100:3000"      # open http://localhost:3100
