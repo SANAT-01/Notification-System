@@ -1,0 +1,68 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"      # AMQP
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+
+  # Header-tolerant proxy for the management UI (works around HTTP 431 from the
+  # platform's large cookies). Browse the UI on port 15672 (guest/guest).
+  mgmt-proxy:
+    image: nginx:alpine
+    container_name: mgmt-proxy
+    depends_on:
+      - rabbitmq
+    ports:
+      - "15672:15672"    # management UI (guest/guest)
+    volumes:
+      - ./mgmt-proxy.conf:/etc/nginx/nginx.conf:ro
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+
+  producer:
+    build: ./app
+    container_name: producer
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+    # Idle service; ./notify.sh execs publish.py inside it to fire notifications.
+    command: ["tail", "-f", "/dev/null"]
+
+  push-worker:
+    build: ./app
+    container_name: push-worker
+    depends_on:
+      - rabbitmq
+      - redis
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      REDISHOST: redis
+      CHANNEL: push
+      # No dedupe to start — adding the idempotency record is the student's fix.
+      IDEMPOTENCY_ENABLED: "false"
+      # Off until the claim-lease task — closes the gap the plain claim leaves.
+      CLAIM_LEASE_ENABLED: "false"
+    # The crash task makes this worker exit on purpose; Docker brings it back so
+    # RabbitMQ can redeliver the un-acked message.
+    restart: unless-stopped
+    command: ["python", "/app/worker.py"]
+
+  email-worker:
+    build: ./app
+    container_name: email-worker
+    depends_on:
+      - rabbitmq
+      - redis
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      REDISHOST: redis
+      CHANNEL: email
+      IDEMPOTENCY_ENABLED: "false"
+      CLAIM_LEASE_ENABLED: "false"
+    restart: unless-stopped
+    command: ["python", "/app/worker.py"]
