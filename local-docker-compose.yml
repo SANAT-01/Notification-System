@@ -2,25 +2,26 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq
-    restart: unless-stopped
+    ports:
+      - "5672:5672"      # AMQP
     volumes:
       - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks: [notifications]
 
   # Header-tolerant proxy for the management UI (works around HTTP 431 from the
-  # platform's large cookies). Admin tool — kept off the public internet.
+  # platform's large cookies). Browse the UI on port 15672 (guest/guest).
   mgmt-proxy:
     image: nginx:alpine
     container_name: mgmt-proxy
-    restart: unless-stopped
     depends_on:
       - rabbitmq
     ports:
-      - "127.0.0.1:15672:15672"   # tunnel in, don't expose publicly
+      - "15672:15672"    # management UI (guest/guest)
     volumes:
       - ./mgmt-proxy.conf:/etc/nginx/nginx.conf:ro
-    networks: [notifications]
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
 
   # Express HTTP API: POST /notify queues one event, fanned out to
   # notify.push + notify.email. Not published to the host — only the
@@ -28,9 +29,9 @@ services:
   producer:
     build: ./app
     container_name: producer
-    restart: unless-stopped
     depends_on:
       - rabbitmq
+      - redis
     environment:
       SERVICE_NAME: producer
       RABBITMQ_HOST: rabbitmq
@@ -42,14 +43,13 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    networks: [notifications, backend-net]
 
   push-worker:
     build: ./app
     container_name: push-worker
-    restart: unless-stopped
     depends_on:
       - rabbitmq
+      - redis
     environment:
       SERVICE_NAME: push-worker
       RABBITMQ_HOST: rabbitmq
@@ -62,15 +62,15 @@ services:
       CLAIM_LEASE_ENABLED: "false"
     # The crash task makes this worker exit on purpose; Docker brings it back so
     # RabbitMQ can redeliver the un-acked message.
+    restart: unless-stopped
     command: ["node", "src/worker/index.js"]
-    networks: [notifications, backend-net]
 
   email-worker:
     build: ./app
     container_name: email-worker
-    restart: unless-stopped
     depends_on:
       - rabbitmq
+      - redis
     environment:
       SERVICE_NAME: email-worker
       RABBITMQ_HOST: rabbitmq
@@ -79,32 +79,17 @@ services:
       PORT: "3000"
       IDEMPOTENCY_ENABLED: "false"
       CLAIM_LEASE_ENABLED: "false"
+    restart: unless-stopped
     command: ["node", "src/worker/index.js"]
-    networks: [notifications, backend-net]
 
   # Browser dashboard to fire lab scenarios. Proxies server-side to the
   # producer over the Docker network — the producer is never exposed to the host.
   dashboard:
     build: ./web
     container_name: dashboard
-    restart: unless-stopped
     depends_on:
       - producer
     environment:
       PRODUCER_URL: http://producer:3000
-    networks: [notifications]
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.notifications.rule=Host(`notifications.sanattudu.tech`)"
-      - "traefik.http.routers.notifications.entrypoints=websecure"
-      - "traefik.http.routers.notifications.tls=true"
-      - "traefik.http.routers.notifications.tls.certresolver=letsencrypt"
-      - "traefik.http.services.notifications.loadbalancer.server.port=3000"
-
-networks:
-  notifications:
-  backend-net:
-    external: true
-
-volumes:
-  rabbitmq_data:
+    ports:
+      - "3100:3000"      # open http://localhost:3100
