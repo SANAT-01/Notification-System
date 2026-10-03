@@ -92,6 +92,7 @@ services:
       - producer
     environment:
       PRODUCER_URL: http://producer:3000
+      HOSTNAME: "0.0.0.0"
     networks: [notifications]
     labels:
       - "traefik.enable=true"
